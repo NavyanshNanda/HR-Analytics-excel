@@ -1,0 +1,648 @@
+'use client';
+
+import React, { useMemo, useState, useEffect } from 'react';
+import { CandidateRecord, DateFilters, ReqType } from '@/lib/types';
+import { calculatePanelistMetrics, calculateReqMetrics } from '@/lib/calculations';
+import { filterDataForPanelist, filterDataByReqType } from '@/lib/dataProcessing';
+import { DashboardHeader } from '@/components/layout/DashboardHeader';
+import { FilterPanel } from '@/components/layout/FilterPanel';
+import { MetricCard, MetricCardGroup } from '@/components/ui/MetricCard';
+import { ChartCard } from '@/components/ui/ChartCard';
+import { PassRateChart } from '@/components/charts/PassRateChart';
+import { AlertBadge } from '@/components/ui/AlertBadge';
+import { StatusBadge } from '@/components/ui/StatusBadge';
+import { DashboardSidebar } from '@/components/layout/DashboardSidebar';
+import { formatDate, formatHoursToReadable } from '@/lib/utils';
+import { 
+  ClipboardList, 
+  CheckCircle, 
+  XCircle, 
+  AlertTriangle, 
+  Clock,
+  Search,
+  Filter,
+  X
+} from 'lucide-react';
+import { DateFilter } from '@/components/ui/DateFilter';
+import { MultiSelectFilter } from '@/components/ui/MultiSelectFilter';
+import { FilterBadge } from '@/components/ui/FilterBadge';
+
+interface PanelistDashboardProps {
+  data: CandidateRecord[];
+  panelistName: string;
+}
+
+export default function PanelistDashboard({ data, panelistName }: PanelistDashboardProps) {
+  const [searchTerm, setSearchTerm] = useState('');
+  const [roundFilter, setRoundFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [showAllInterviews, setShowAllInterviews] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 20;
+  const [filters, setFilters] = useState<DateFilters>({});
+  const [selectedDesignations, setSelectedDesignations] = useState<string[]>([]);
+  const [selectedCandidates, setSelectedCandidates] = useState<string[]>([]);
+  const [selectedLocations, setSelectedLocations] = useState<string[]>([]);
+  const [reqType, setReqType] = useState<ReqType>('all');
+  const [showInterviewTable, setShowInterviewTable] = useState(false);
+  const [activeSection, setActiveSection] = useState('my-performance');
+  const interviewTableRef = React.useRef<HTMLDivElement>(null);
+  
+  // Auto-show interview table when Interviews section is selected
+  useEffect(() => {
+    if (activeSection === 'interviews') {
+      setShowInterviewTable(true);
+    }
+  }, [activeSection]);
+  
+  // Filter data for this panelist
+  const panelistData = useMemo(() => {
+    return filterDataForPanelist(data, panelistName);
+  }, [data, panelistName]);
+  
+  // Get all unique options for filters
+  const allDesignations = useMemo(() => {
+    const designations = new Set<string>();
+    panelistData.forEach(r => {
+      if (r.designation) designations.add(r.designation);
+    });
+    return Array.from(designations).sort();
+  }, [panelistData]);
+
+  const allCandidates = useMemo(() => {
+    return Array.from(new Set(panelistData.map(r => r.candidateName))).sort();
+  }, [panelistData]);
+
+  const allLocations = useMemo(() => {
+    const locations = new Set<string>();
+    panelistData.forEach(r => {
+      if (r.currentLocation) locations.add(r.currentLocation);
+    });
+    return Array.from(locations).sort();
+  }, [panelistData]);
+  
+  // Calculate req metrics for open/closed reqs
+  const reqMetrics = useMemo(() => {
+    return calculateReqMetrics(panelistData);
+  }, [panelistData]);
+  
+  // Apply all filters
+  const filteredData = useMemo(() => {
+    let result = panelistData.filter(record => {
+      // Date filters
+      if (filters.reqDateFrom && (!record.reqDate || record.reqDate < filters.reqDateFrom)) return false;
+      if (filters.reqDateTo && (!record.reqDate || record.reqDate > filters.reqDateTo)) return false;
+      if (filters.sourcingDateFrom && (!record.sourcingDate || record.sourcingDate < filters.sourcingDateFrom)) return false;
+      if (filters.sourcingDateTo && (!record.sourcingDate || record.sourcingDate > filters.sourcingDateTo)) return false;
+      if (filters.screeningDateFrom && (!record.screeningDate || record.screeningDate < filters.screeningDateFrom)) return false;
+      if (filters.screeningDateTo && (!record.screeningDate || record.screeningDate > filters.screeningDateTo)) return false;
+      
+      // Designation filter
+      if (selectedDesignations.length > 0 && !selectedDesignations.includes(record.designation)) return false;
+      
+      // Candidate filter
+      if (selectedCandidates.length > 0 && !selectedCandidates.includes(record.candidateName)) return false;
+      
+      // Location filter
+      if (selectedLocations.length > 0 && (!record.currentLocation || !selectedLocations.includes(record.currentLocation))) return false;
+      
+      return true;
+    });
+    
+    // Apply req type filter (open/closed)
+    if (reqType !== 'all') {
+      result = filterDataByReqType(result, reqType, reqMetrics.reqs);
+    }
+    
+    return result;
+  }, [panelistData, filters, selectedDesignations, selectedCandidates, selectedLocations, reqType, reqMetrics]);
+  
+  // Active filter count
+  const activeFilterCount = 
+    selectedDesignations.length +
+    selectedCandidates.length +
+    selectedLocations.length +
+    (reqType !== 'all' ? 1 : 0);
+  
+  // Clear all filters
+  const clearAllFilters = () => {
+    setFilters({});
+    setSelectedDesignations([]);
+    setSelectedCandidates([]);
+    setSelectedLocations([]);
+    setReqType('all');
+    setCurrentPage(1);
+  };
+  
+  // Calculate metrics from filtered data
+  const metrics = useMemo(() => {
+    return calculatePanelistMetrics(filteredData, panelistName);
+  }, [filteredData, panelistName]);
+  
+  // Calculate cleared and rejected counts for each round
+  const roundStats = useMemo(() => {
+    const r1Interviews = metrics.interviews.filter(i => i.round === 'R1');
+    const r2Interviews = metrics.interviews.filter(i => i.round === 'R2');
+    const r3Interviews = metrics.interviews.filter(i => i.round === 'R3');
+    
+    return {
+      r1Cleared: r1Interviews.filter(i => i.status === 'Cleared').length,
+      r1Rejected: r1Interviews.filter(i => i.status === 'Not Cleared').length,
+      r2Cleared: r2Interviews.filter(i => i.status === 'Cleared').length,
+      r2Rejected: r2Interviews.filter(i => i.status === 'Not Cleared').length,
+      r3Cleared: r3Interviews.filter(i => i.status === 'Cleared').length,
+      r3Rejected: r3Interviews.filter(i => i.status === 'Not Cleared').length,
+    };
+  }, [metrics.interviews]);
+  
+  // Get interviews with alerts from filtered data
+  const alertInterviews = useMemo(() => {
+    return metrics.interviews.filter(i => i.isAlert || i.isPendingFeedback);
+  }, [metrics.interviews]);
+  
+  // Format alerts for dropdown
+  const panelistAlerts = useMemo(() => {
+    return alertInterviews.map(i => ({
+      panelistName: panelistName,
+      candidateName: i.candidateName,
+      round: i.round,
+      interviewDate: i.interviewDate,
+      feedbackDate: i.feedbackDate,
+      hours: i.timeDifferenceHours,
+      isPending: i.isPendingFeedback,
+    }));
+  }, [alertInterviews, panelistName]);
+  
+  // Handle navigation to interview when alert is clicked
+  const handleAlertClick = (candidateName: string) => {
+    setSearchTerm(candidateName);
+    setRoundFilter('all');
+    setStatusFilter('all');
+    // Scroll to table with offset for fixed header
+    setTimeout(() => {
+      const tableSection = document.querySelector('#interviews-table');
+      if (tableSection) {
+        const elementPosition = tableSection.getBoundingClientRect().top + window.pageYOffset;
+        const offsetPosition = elementPosition - 120; // Offset for header + filters
+        window.scrollTo({ top: offsetPosition, behavior: 'smooth' });
+      }
+    }, 100);
+  };
+  
+  // Filter interviews for table
+  const filteredInterviews = useMemo(() => {
+    let filtered = metrics.interviews;
+    
+    if (searchTerm) {
+      const term = searchTerm.toLowerCase();
+      filtered = filtered.filter(i => 
+        i.candidateName.toLowerCase().includes(term)
+      );
+    }
+    
+    if (roundFilter !== 'all') {
+      filtered = filtered.filter(i => i.round === roundFilter);
+    }
+    
+    if (statusFilter !== 'all') {
+      if (statusFilter === 'alert') {
+        filtered = filtered.filter(i => i.isAlert || i.isPendingFeedback);
+      } else {
+        filtered = filtered.filter(i => i.status.toLowerCase().includes(statusFilter.toLowerCase()));
+      }
+    }
+    
+    return filtered;
+  }, [metrics.interviews, searchTerm, roundFilter, statusFilter]);
+  
+  return (
+    <div className="min-h-screen bg-surface-secondary">
+      <DashboardHeader
+        title="Panelist Dashboard"
+        subtitle={`${metrics.totalInterviews} interviews conducted`}
+        userName={panelistName}
+        userRole="Panelist"
+        recruiterAlerts={[]}
+        panelistAlerts={panelistAlerts}
+        onAlertClick={handleAlertClick}
+        onBellClick={() => {
+          setActiveSection('alerts');
+        }}
+        activeFilterCount={activeFilterCount}
+        onClearAll={clearAllFilters}
+        actions={
+          <FilterPanel
+            dateFilters={filters}
+            onDateFilterChange={setFilters}
+            showReqDate={true}
+            showSourcingDate={true}
+            showScreeningDate={true}
+            allDesignations={allDesignations}
+            selectedDesignations={selectedDesignations}
+            onDesignationsChange={setSelectedDesignations}
+            allCandidates={allCandidates}
+            selectedCandidates={selectedCandidates}
+            onCandidatesChange={setSelectedCandidates}
+            allLocations={allLocations}
+            selectedLocations={selectedLocations}
+            onLocationsChange={setSelectedLocations}
+            reqType={reqType}
+            onReqTypeChange={setReqType}
+
+          />
+        }
+      />
+      
+      <div className="flex overflow-x-hidden">
+        <DashboardSidebar
+          userRole="panelist"
+          activeSection={activeSection}
+          onSectionChange={setActiveSection}
+        />
+        
+        <main className="flex-1 overflow-y-auto px-6 lg:px-8 py-6 max-w-[1400px] mx-auto w-full" style={{ marginLeft: '256px' }}>
+        
+        {/* Section Header */}
+        <div className="mb-5">
+          <h1 className="text-base font-semibold text-slate-900 tracking-tight capitalize">
+            {activeSection === 'my-performance' ? 'My Performance' :
+             activeSection === 'interviews' ? 'My Interviews' :
+             activeSection === 'alerts' ? 'My Alerts' : activeSection}
+          </h1>
+          <p className="text-xs text-slate-500 mt-0.5">
+            {activeSection === 'my-performance' && 'Your performance metrics, interviews by round, pass rates, and outcomes'}
+            {activeSection === 'interviews' && 'All interviews assigned to you with detailed information'}
+            {activeSection === 'alerts' && 'Interviews requiring your immediate attention'}
+          </p>
+        </div>
+        
+        {/* Filter Badges */}
+        {activeFilterCount > 0 && (
+          <div className="mb-6 flex flex-wrap gap-2">
+            {selectedDesignations.length > 0 && (
+              <FilterBadge
+                label="Designations"
+                count={selectedDesignations.length}
+                onClear={() => setSelectedDesignations([])}
+              />
+            )}
+            {selectedCandidates.length > 0 && (
+              <FilterBadge
+                label="Candidates"
+                count={selectedCandidates.length}
+                onClear={() => setSelectedCandidates([])}
+              />
+            )}
+            {selectedLocations.length > 0 && (
+              <FilterBadge
+                label="Locations"
+                count={selectedLocations.length}
+                onClear={() => setSelectedLocations([])}
+              />
+            )}
+          </div>
+        )}
+        
+        {/* Key Metrics - Show in my-performance section only */}
+        {activeSection === 'my-performance' && (
+        <section className="mb-8">
+          <h2 className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-3">My Performance</h2>
+          <MetricCardGroup>
+            <MetricCard
+              title="Total Interviews"
+              value={metrics.totalInterviews}
+              icon={ClipboardList}
+              color="blue"
+            />
+            <MetricCard
+              title="Passed"
+              value={metrics.passedInterviews}
+              subtitle={`${metrics.passRate.toFixed(1)}% pass rate`}
+              icon={CheckCircle}
+              color="green"
+            />
+            <MetricCard
+              title="Avg Feedback Time"
+              value={formatHoursToReadable(metrics.avgFeedbackTimeHours)}
+              subtitle={metrics.avgFeedbackTimeHours > 48 ? 'Exceeds 48h limit' : 'Within limit'}
+              icon={Clock}
+              color={metrics.avgFeedbackTimeHours > 48 ? 'red' : 'green'}
+            />
+          </MetricCardGroup>
+        </section>
+        )}
+        
+        {/* Interviews by Round - Show in my-performance section only */}
+        {activeSection === 'my-performance' && (
+        <section className="mb-8">
+          <ChartCard
+            title="Interviews by Round"
+            variant="glass"
+          >
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center p-4 bg-blue-50 rounded-lg border border-blue-200">
+                <p className="text-3xl font-bold text-blue-700">{metrics.r1Interviews}</p>
+                <p className="text-sm text-blue-600">Round 1</p>
+                <p className="text-xs text-blue-500 mt-1">
+                  {metrics.r1PassRate.toFixed(1)}% pass rate
+                </p>
+              </div>
+              <div className="text-center p-4 bg-purple-50 rounded-lg border border-purple-200">
+                <p className="text-3xl font-bold text-purple-700">{metrics.r2Interviews}</p>
+                <p className="text-sm text-purple-600">Round 2</p>
+                <p className="text-xs text-purple-500 mt-1">
+                  {metrics.r2PassRate.toFixed(1)}% pass rate
+                </p>
+              </div>
+              <div className="text-center p-4 bg-orange-50 rounded-lg border border-orange-200">
+                <p className="text-3xl font-bold text-orange-700">{metrics.r3Interviews}</p>
+                <p className="text-sm text-orange-600">Round 3</p>
+                <p className="text-xs text-orange-500 mt-1">
+                  {metrics.r3PassRate.toFixed(1)}% pass rate
+                </p>
+              </div>
+            </div>
+          </ChartCard>
+        </section>
+        )}
+        
+        {/* Pass Rate Chart - Show in my-performance section only */}
+        {activeSection === 'my-performance' && (
+        <section className="mb-8">
+          <PassRateChart data={roundStats} />
+        </section>
+        )}
+        
+        {/* Interview Status Summary - Show in my-performance section only */}
+        {activeSection === 'my-performance' && (
+        <section className="mb-8">
+          <ChartCard
+            title="Interview Outcomes"
+            variant="glass"
+          >
+            <div className="grid grid-cols-3 gap-4">
+              <div className="text-center p-4 bg-green-50 rounded-lg border border-green-200">
+                <p className="text-3xl font-bold text-green-700">{metrics.passedInterviews}</p>
+                <p className="text-sm text-green-600">Passed</p>
+                <div className="mt-2 h-2 bg-green-200 rounded-full">
+                  <div 
+                    className="h-full bg-green-500 rounded-full"
+                    style={{ width: `${metrics.totalInterviews > 0 ? (metrics.passedInterviews / metrics.totalInterviews) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+              <div className="text-center p-4 bg-red-50 rounded-lg border border-red-200">
+                <p className="text-3xl font-bold text-red-700">{metrics.failedInterviews}</p>
+                <p className="text-sm text-red-600">Failed</p>
+                <div className="mt-2 h-2 bg-red-200 rounded-full">
+                  <div 
+                    className="h-full bg-red-500 rounded-full"
+                    style={{ width: `${metrics.totalInterviews > 0 ? (metrics.failedInterviews / metrics.totalInterviews) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+              <div className="text-center p-4 bg-yellow-50 rounded-lg border border-yellow-200">
+                <p className="text-3xl font-bold text-yellow-700">{metrics.pendingInterviews}</p>
+                <p className="text-sm text-yellow-600">Pending</p>
+                <div className="mt-2 h-2 bg-yellow-200 rounded-full">
+                  <div 
+                    className="h-full bg-yellow-500 rounded-full"
+                    style={{ width: `${metrics.totalInterviews > 0 ? (metrics.pendingInterviews / metrics.totalInterviews) * 100 : 0}%` }}
+                  />
+                </div>
+              </div>
+            </div>
+          </ChartCard>
+        </section>
+        )}
+        
+        {/* Alerts Section - Dedicated Display */}
+        {activeSection === 'alerts' && (
+        <section className="mb-8">
+          <ChartCard
+            title="My Alerts"
+            subtitle={`${panelistAlerts.length} pending feedback ${panelistAlerts.length === 1 ? 'item' : 'items'} requiring attention`}
+            variant="glass"
+          >
+            {panelistAlerts.length > 0 ? (
+              <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                <div className="flex items-center gap-2 mb-4">
+                  <div className="w-2 h-2 bg-blue-600 rounded-full animate-pulse"></div>
+                  <h4 className="font-semibold text-blue-800">
+                    Pending Feedback ({panelistAlerts.length})
+                  </h4>
+                  <span className="text-xs text-blue-600">Your interviews requiring feedback</span>
+                </div>
+                <div className="space-y-2 max-h-96 overflow-y-auto">
+                  {panelistAlerts.map((alert, idx) => (
+                    <div
+                      key={idx}
+                      className="bg-white rounded-lg p-3 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between">
+                        <div className="flex-1 min-w-0">
+                          <p className="font-medium text-slate-800 truncate">{alert.candidateName}</p>
+                          <p className="text-xs text-slate-600 mt-0.5">
+                            Round: {alert.round}
+                          </p>
+                          <p className="text-xs text-slate-500 mt-1">
+                            Interview: {formatDate(alert.interviewDate)}
+                          </p>
+                        </div>
+                        {alert.isPending ? (
+                          <span className="text-xs font-semibold text-yellow-600 whitespace-nowrap ml-2">
+                            Pending
+                          </span>
+                        ) : (
+                          <span className="text-xs font-semibold text-orange-600 whitespace-nowrap ml-2">
+                            {alert.hours !== null ? formatHoursToReadable(alert.hours) : 'Delayed'}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : (
+              <div className="text-center py-12 text-slate-500">
+                <Clock className="w-12 h-12 mx-auto mb-3 text-slate-300" />
+                <p className="text-sm font-medium">No alerts at this time</p>
+                <p className="text-xs mt-1">All feedback has been provided</p>
+              </div>
+            )}
+          </ChartCard>
+        </section>
+        )}
+        
+        {/* Interview Details Table - Show in interviews section only */}
+        {activeSection === 'interviews' && (
+        <section ref={interviewTableRef}>
+          <ChartCard
+            title="Interview Details"
+            subtitle={`${filteredInterviews.length} total interviews`}
+            variant="glass"
+            action={
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowInterviewTable(!showInterviewTable)}
+                  className="px-4 py-2 bg-blue-50 text-blue-700 rounded-lg hover:bg-blue-100 transition-colors text-sm font-medium"
+                >
+                  {showInterviewTable ? 'Collapse' : 'View All'}
+                </button>
+                {showInterviewTable && (
+                  <>
+                {/* Search */}
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="text"
+                    placeholder="Search candidates..."
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    className="input-field pl-9 py-2 text-sm w-48"
+                  />
+                </div>
+                
+                {/* Round Filter */}
+                <select
+                  value={roundFilter}
+                  onChange={(e) => setRoundFilter(e.target.value)}
+                  className="select-field py-2 text-sm w-28"
+                >
+                  <option value="all">All Rounds</option>
+                  <option value="R1">R1</option>
+                  <option value="R2">R2</option>
+                  <option value="R3">R3</option>
+                </select>
+                
+                {/* Status Filter */}
+                <select
+                  value={statusFilter}
+                  onChange={(e) => setStatusFilter(e.target.value)}
+                  className="select-field py-2 text-sm w-32"
+                >
+                  <option value="all">All Status</option>
+                  <option value="cleared">Cleared</option>
+                  <option value="not cleared">Not Cleared</option>
+                  <option value="pending">Pending</option>
+                  <option value="alert">With Alerts</option>
+                </select>
+                  </>
+                )}
+              </div>
+            }
+          >
+            {showInterviewTable && (
+            <div className="overflow-x-auto" style={{ maxHeight: '400px', overflowY: 'auto' }}>
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>Candidate</th>
+                    <th>Round</th>
+                    <th>Interview Date</th>
+                    <th>Feedback Date</th>
+                    <th>Time Diff</th>
+                    <th>Round Status</th>
+                    <th>Final Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredInterviews.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="text-center py-8 text-slate-500">
+                        No interviews found matching your criteria
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredInterviews
+                      .slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage)
+                      .map((interview, idx) => (
+                      <tr 
+                        key={idx} 
+                        className={interview.isAlert || interview.isPendingFeedback ? 'bg-red-50' : ''}
+                      >
+                        <td className="font-medium">
+                          <div className="flex items-center gap-2">
+                            {interview.candidateName}
+                            {(interview.isAlert || interview.isPendingFeedback) && (
+                              <AlertBadge isAlert={true} compact />
+                            )}
+                          </div>
+                        </td>
+                        <td>
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${
+                            interview.round === 'R1' ? 'bg-blue-100 text-blue-700' :
+                            interview.round === 'R2' ? 'bg-purple-100 text-purple-700' :
+                            'bg-orange-100 text-orange-700'
+                          }`}>
+                            {interview.round}
+                          </span>
+                        </td>
+                        <td>{formatDate(interview.interviewDate)}</td>
+                        <td>{formatDate(interview.feedbackDate)}</td>
+                        <td className={interview.isAlert ? 'text-red-600 font-medium' : ''}>
+                          {interview.isPendingFeedback ? (
+                            <span className="text-yellow-600">Pending</span>
+                          ) : (
+                            formatHoursToReadable(interview.timeDifferenceHours)
+                          )}
+                        </td>
+                        <td>
+                          <StatusBadge status={interview.status} size="sm" />
+                        </td>
+                        <td>
+                          <StatusBadge status={interview.finalStatus} size="sm" />
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+              
+              {filteredInterviews.length > itemsPerPage && (
+                <div className="mt-4 border-t border-slate-200 pt-4">
+                  <div className="flex items-center justify-between">
+                    <button
+                      onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                      disabled={currentPage === 1}
+                      className="px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Previous
+                    </button>
+                    
+                    <div className="flex gap-2">
+                      {Array.from({ length: Math.ceil(filteredInterviews.length / itemsPerPage) }, (_, i) => i + 1).map(pageNum => (
+                        <button
+                          key={pageNum}
+                          onClick={() => setCurrentPage(pageNum)}
+                          className={`px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                            currentPage === pageNum
+                              ? 'bg-blue-600 text-white border border-blue-600'
+                              : 'text-slate-700 bg-white border border-slate-300 hover:bg-slate-50'
+                          }`}
+                        >
+                          {pageNum}
+                        </button>
+                      ))}
+                    </div>
+                    
+                    <button
+                      onClick={() => setCurrentPage(p => Math.min(Math.ceil(filteredInterviews.length / itemsPerPage), p + 1))}
+                      disabled={currentPage >= Math.ceil(filteredInterviews.length / itemsPerPage)}
+                      className="px-3 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-lg hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+            )}
+          </ChartCard>
+        </section>
+        )}
+      </main>
+      </div>
+    </div>
+  );
+}

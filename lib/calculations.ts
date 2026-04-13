@@ -1,0 +1,401 @@
+import { 
+  CandidateRecord, 
+  PipelineMetrics, 
+  SourceDistributionItem,
+  RecruiterMetrics,
+  PanelistMetrics,
+  InterviewRecord,
+  ReqRecord,
+  ReqMetrics
+} from './types';
+import { 
+  calculateTimeDifferenceHours, 
+  is48HourAlertTriggered,
+  extractInterviewsForPanelist,
+  isFeedbackPending
+} from './utils';
+import { filterDataForRecruiter } from './dataProcessing';
+
+// Calculate recruitment pipeline metrics
+export function calculatePipelineMetrics(data: CandidateRecord[]): PipelineMetrics {
+  // Category-based counts
+  const categoryMetrics = {
+    joined: data.filter(r => r.dashboardCategory === 'Joined').length,
+    selected: data.filter(r => r.dashboardCategory === 'Selected').length,
+    rejected: data.filter(r => r.dashboardCategory === 'Rejected').length,
+    screeningReject: data.filter(r => r.dashboardCategory === 'Screening Reject').length,
+    pendingActive: data.filter(r => r.dashboardCategory === 'Pending/Active').length,
+    other: data.filter(r => r.dashboardCategory === 'Other').length,
+  };
+
+  return {
+    totalCandidates: data.length,
+    screeningCleared: data.filter(r => r.screeningCheckStatus === 'Cleared').length,
+    screeningNotCleared: data.filter(r => r.screeningCheckStatus === 'Not Cleared').length,
+    screeningInProgress: data.filter(r => r.screeningCheckStatus === 'In progress').length,
+    r1Cleared: data.filter(r => r.statusOfR1 === 'Cleared').length,
+    r1NotCleared: data.filter(r => r.statusOfR1 === 'Not Cleared').length,
+    r1Pending: data.filter(r => r.statusOfR1 === 'Pending at R1').length,
+    r2Cleared: data.filter(r => r.statusOfR2 === 'Cleared').length,
+    r2NotCleared: data.filter(r => r.statusOfR2 === 'Not Cleared').length,
+    r2Pending: data.filter(r => r.statusOfR2 === 'Pending at R2').length,
+    r3Cleared: data.filter(r => r.statusOfR3 === 'Cleared').length,
+    r3NotCleared: data.filter(r => r.statusOfR3 === 'Not Cleared').length,
+    r3Pending: data.filter(r => r.statusOfR3 === 'Pending at R3').length,
+    offered: data.filter(r => r.offerDate !== null).length,
+    joined: categoryMetrics.joined,
+    selected: categoryMetrics.selected,
+    rejected: categoryMetrics.rejected,
+    inProgress: data.filter(r => 
+      r.finalStatus === 'In progress' || 
+      r.finalStatus === 'Pending at R1' || 
+      r.finalStatus === 'Pending at R2' ||
+      r.finalStatus === 'Pending at R3'
+    ).length,
+    onHold: data.filter(r => r.finalStatus === 'Req on hold').length,
+    // New category metrics
+    screeningReject: categoryMetrics.screeningReject,
+    pendingActive: categoryMetrics.pendingActive,
+    other: categoryMetrics.other,
+  };
+}
+
+// Calculate source distribution
+export function calculateSourceDistribution(data: CandidateRecord[]): SourceDistributionItem[] {
+  const sourceMap = new Map<string, { count: number; subSources: Map<string, number> }>();
+  
+  data.forEach(record => {
+    let source = (record.source || 'Unknown').trim();
+    let subSource = (record.subSource || 'Direct').trim();
+    
+    // Normalize source categories
+    const sourceLower = source.toLowerCase();
+    const subSourceLower = subSource.toLowerCase();
+    
+    // Normalize Walk-In variations
+    if (sourceLower === 'walkin' || sourceLower === 'walk-in' || sourceLower === 'walk in') {
+      source = 'Walk-In';
+    }
+    
+    // Combine Employee Referral and Referral
+    if (sourceLower === 'employee referral' || sourceLower === 'referral') {
+      source = 'Referral';
+    }
+    
+    // Move "Direct" from Unknown to Walk-In
+    if (sourceLower === 'unknown' && subSourceLower === 'direct') {
+      source = 'Walk-In';
+      subSource = 'Direct';
+    }
+    
+    // Move LinkedIn Posting to Job Site
+    if (subSourceLower.includes('linkedin')) {
+      source = 'Job Site';
+      subSource = 'LinkedIn';
+    }
+    
+    if (!sourceMap.has(source)) {
+      sourceMap.set(source, { count: 0, subSources: new Map() });
+    }
+    
+    const sourceData = sourceMap.get(source)!;
+    sourceData.count++;
+    
+    const currentSubCount = sourceData.subSources.get(subSource) || 0;
+    sourceData.subSources.set(subSource, currentSubCount + 1);
+  });
+  
+  const total = data.length;
+  const result: SourceDistributionItem[] = [];
+  
+  sourceMap.forEach((value, source) => {
+    const subSourcesArray = Array.from(value.subSources.entries()).map(([subSource, count]) => ({
+      subSource,
+      count,
+    }));
+    
+    result.push({
+      source,
+      count: value.count,
+      percentage: total > 0 ? Math.round((value.count / total) * 100) : 0,
+      subSources: subSourcesArray,
+    });
+  });
+  
+  return result.sort((a, b) => b.count - a.count);
+}
+
+// Calculate recruiter metrics
+export function calculateRecruiterMetrics(
+  data: CandidateRecord[], 
+  recruiterName: string
+): RecruiterMetrics {
+  const recruiterData = filterDataForRecruiter(data, recruiterName);
+  
+  const screeningCleared = recruiterData.filter(r => r.screeningCheckStatus === 'Cleared').length;
+  const screeningNotCleared = recruiterData.filter(r => r.screeningCheckStatus === 'Not Cleared').length;
+  const screeningInProgress = recruiterData.filter(r => r.screeningCheckStatus === 'In progress').length;
+  const total = recruiterData.length;
+  
+  // Calculate 48-hour alerts
+  let alertCount = 0;
+  let totalSourcingToScreeningHours = 0;
+  let validSourcingToScreeningCount = 0;
+  
+  recruiterData.forEach(record => {
+    if (is48HourAlertTriggered(record.sourcingDate, record.screeningDate)) {
+      alertCount++;
+    }
+    
+    const timeDiff = calculateTimeDifferenceHours(record.sourcingDate, record.screeningDate);
+    if (timeDiff !== null && timeDiff >= 0) {
+      totalSourcingToScreeningHours += timeDiff;
+      validSourcingToScreeningCount++;
+    }
+  });
+  
+  // Calculate conversion rate (Selected / Total sourced)
+  const selectedCount = recruiterData.filter(r => r.finalStatus === 'Selected').length;
+  const conversionRate = total > 0 ? (selectedCount / total) * 100 : 0;
+  
+  return {
+    recruiterName,
+    candidatesSourced: total,
+    screeningCleared,
+    screeningNotCleared,
+    screeningInProgress,
+    screeningRate: total > 0 ? (screeningCleared / total) * 100 : 0,
+    alertCount,
+    avgSourcingToScreeningHours: validSourcingToScreeningCount > 0 
+      ? totalSourcingToScreeningHours / validSourcingToScreeningCount 
+      : 0,
+    conversionRate,
+    candidates: recruiterData,
+  };
+}
+
+// Calculate panelist metrics
+export function calculatePanelistMetrics(
+  data: CandidateRecord[],
+  panelistName: string
+): PanelistMetrics {
+  const interviews = extractInterviewsForPanelist(data, panelistName);
+  
+  const r1Interviews = interviews.filter(i => i.round === 'R1');
+  const r2Interviews = interviews.filter(i => i.round === 'R2');
+  const r3Interviews = interviews.filter(i => i.round === 'R3');
+  
+  const passedInterviews = interviews.filter(i => i.status === 'Cleared').length;
+  const failedInterviews = interviews.filter(i => i.status === 'Not Cleared').length;
+  const pendingInterviews = interviews.filter(i => 
+    i.status === 'Pending at R1' || 
+    i.status === 'Pending at R2' || 
+    i.status === 'Pending at R3' ||
+    i.status === ''
+  ).length;
+  
+  // Calculate pass rates
+  const calculatePassRate = (arr: InterviewRecord[]): number => {
+    const completed = arr.filter(i => i.status === 'Cleared' || i.status === 'Not Cleared');
+    if (completed.length === 0) return 0;
+    const passed = completed.filter(i => i.status === 'Cleared').length;
+    return (passed / completed.length) * 100;
+  };
+  
+  // Calculate average feedback time
+  let totalFeedbackHours = 0;
+  let validFeedbackCount = 0;
+  let alertCount = 0;
+  
+  interviews.forEach(interview => {
+    if (interview.timeDifferenceHours !== null && interview.timeDifferenceHours >= 0) {
+      totalFeedbackHours += interview.timeDifferenceHours;
+      validFeedbackCount++;
+    }
+    
+    if (interview.isAlert || interview.isPendingFeedback) {
+      alertCount++;
+    }
+  });
+  
+  return {
+    panelistName,
+    totalInterviews: interviews.length,
+    r1Interviews: r1Interviews.length,
+    r2Interviews: r2Interviews.length,
+    r3Interviews: r3Interviews.length,
+    passedInterviews,
+    failedInterviews,
+    pendingInterviews,
+    passRate: calculatePassRate(interviews),
+    r1PassRate: calculatePassRate(r1Interviews),
+    r2PassRate: calculatePassRate(r2Interviews),
+    r3PassRate: calculatePassRate(r3Interviews),
+    avgFeedbackTimeHours: validFeedbackCount > 0 
+      ? totalFeedbackHours / validFeedbackCount 
+      : 0,
+    alertCount,
+    interviews,
+  };
+}
+
+// Get all unique recruiters for a hiring manager
+export function getRecruitersForHM(data: CandidateRecord[]): string[] {
+  const recruiters = data
+    .map(r => r.recruiterName)
+    .filter(r => r && r.trim() !== '');
+  return [...new Set(recruiters)].sort();
+}
+
+// Get all unique panelists for a hiring manager
+export function getPanelistsForHM(data: CandidateRecord[]): string[] {
+  const panelists: string[] = [];
+  
+  data.forEach(record => {
+    if (record.panelistNameR1 && record.panelistNameR1.trim()) {
+      panelists.push(record.panelistNameR1.trim());
+    }
+    if (record.panelistNameR2 && record.panelistNameR2.trim()) {
+      panelists.push(record.panelistNameR2.trim());
+    }
+    if (record.panelistNameR3 && record.panelistNameR3.trim()) {
+      panelists.push(record.panelistNameR3.trim());
+    }
+  });
+  
+  return [...new Set(panelists)]
+    .filter(p => p && p.length > 1)
+    .sort();
+}
+
+// Get funnel data for charts
+export function getFunnelData(metrics: PipelineMetrics) {
+  return [
+    { name: 'Total Candidates', value: metrics.totalCandidates, fill: '#3B82F6' },
+    { name: 'Screening Cleared', value: metrics.screeningCleared, fill: '#8B5CF6' },
+    { name: 'R1 Cleared', value: metrics.r1Cleared, fill: '#EC4899' },
+    { name: 'R2 Cleared', value: metrics.r2Cleared, fill: '#F97316' },
+    { name: 'R3 Cleared', value: metrics.r3Cleared, fill: '#EAB308' },
+    { name: 'Offered', value: metrics.offered, fill: '#22C55E' },
+    { name: 'Joined', value: metrics.joined, fill: '#10B981' },
+  ];
+}
+
+// Get 5-stage pipeline data (new categorization logic)
+export function get5StagePipelineData(metrics: PipelineMetrics) {
+  // Stage calculations:
+  // 1. Total Candidates - all candidates
+  // 2. Screening Cleared = Total - Screening Rejects
+  // 3. Interview Cleared = Screening Cleared - Rejected
+  // 4. Offered = Selected
+  // 5. Joined = Joined
+  
+  const totalCandidates = metrics.totalCandidates;
+  const screeningCleared = totalCandidates - metrics.screeningReject;
+  const interviewCleared = screeningCleared - metrics.rejected;
+  const offered = metrics.selected;
+  const joined = metrics.joined;
+  
+  return [
+    { 
+      name: 'Total Candidates', 
+      value: totalCandidates, 
+      fill: '#3B82F6',
+      category: 'all' 
+    },
+    { 
+      name: 'Screening Cleared', 
+      value: screeningCleared, 
+      fill: '#8B5CF6',
+      category: 'screening-cleared' 
+    },
+    { 
+      name: 'Interview Cleared', 
+      value: interviewCleared, 
+      fill: '#EC4899',
+      category: 'interview-cleared' 
+    },
+    { 
+      name: 'Offered', 
+      value: offered, 
+      fill: '#22C55E',
+      category: 'offered' 
+    },
+    { 
+      name: 'Joined', 
+      value: joined, 
+      fill: '#10B981',
+      category: 'joined' 
+    },
+  ];
+}
+
+// Get final status data for pie chart (old version - kept for compatibility)
+export function getFinalStatusData(metrics: PipelineMetrics) {
+  return [
+    { name: 'Selected', value: metrics.selected, fill: '#10B981' },
+    { name: 'Rejected', value: metrics.rejected, fill: '#EF4444' },
+    { name: 'In Progress', value: metrics.inProgress, fill: '#F59E0B' },
+    { name: 'On Hold', value: metrics.onHold, fill: '#6B7280' },
+  ].filter(item => item.value > 0);
+}
+// Calculate req metrics (open vs closed job requisitions)
+export function calculateReqMetrics(data: CandidateRecord[]): ReqMetrics {
+  const reqMap = new Map<string, ReqRecord>();
+
+  // Group candidates by unique req (reqDate + designation + hmDetails)
+  data.forEach(record => {
+    if (!record.designation || !record.reqDate || !record.hmDetails) return;
+
+    const reqKey = `${record.reqDate.toISOString()}_${record.designation}_${record.hmDetails}`;
+    
+    if (!reqMap.has(reqKey)) {
+      // Initialize new req record
+      reqMap.set(reqKey, {
+        reqKey,
+        reqDate: record.reqDate,
+        designation: record.designation,
+        hmDetails: record.hmDetails,
+        skill: record.skill,
+        locationOfPosting: record.locationOfPosting,
+        totalOpenings: record.noOfOpenings,
+        joinedCount: 0,
+        remainingOpenings: record.noOfOpenings,
+        isOpen: true,
+        isClosed: false
+      });
+    }
+
+    // Count candidates who have joined (have a joining date)
+    const req = reqMap.get(reqKey)!;
+    if (record.joiningDate !== null) {
+      req.joinedCount++;
+    }
+  });
+
+  // Calculate remaining openings and status for each req
+  const reqs: ReqRecord[] = [];
+  reqMap.forEach(req => {
+    req.remainingOpenings = Math.max(0, req.totalOpenings - req.joinedCount);
+    req.isClosed = req.remainingOpenings === 0;
+    req.isOpen = !req.isClosed;
+    reqs.push(req);
+  });
+
+  // Calculate summary metrics
+  const openReqs = reqs.filter(r => r.isOpen).length;
+  const closedReqs = reqs.filter(r => r.isClosed).length;
+  const totalOpenings = reqs.reduce((sum, r) => sum + r.totalOpenings, 0);
+  const totalJoined = reqs.reduce((sum, r) => sum + r.joinedCount, 0);
+  const totalRemaining = reqs.reduce((sum, r) => sum + r.remainingOpenings, 0);
+
+  return {
+    totalReqs: reqs.length,
+    openReqs,
+    closedReqs,
+    totalOpenings,
+    totalJoined,
+    totalRemaining,
+    reqs
+  };
+}
