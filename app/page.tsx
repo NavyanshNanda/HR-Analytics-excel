@@ -40,7 +40,7 @@ export default function Home() {
   // Compute live stats from data
   const stats = useMemo(() => {
     if (!data.length) return null;
-    const hms = new Set(data.map(d => d.hiringManagerName).filter(Boolean));
+    const hms = new Set(data.map(d => d.hmDetails).filter(Boolean));
     const recruiters = new Set(data.map(d => d.recruiterName).filter(Boolean));
     const panelists = new Set([
       ...data.map(d => d.panelistNameR1).filter(Boolean),
